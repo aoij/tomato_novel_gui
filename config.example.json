@@ -1,0 +1,12 @@
+{
+  "text": {
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "api_key": "",
+    "model": "mimo-v2.5",
+    "temperature": 0.8,
+    "timeout": 180
+  },
+  "app": {
+    "default_output_dir": "C:\\小说\\短篇"
+  }
+}

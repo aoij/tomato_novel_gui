@@ -176,6 +176,36 @@ JSON 格式：
 """.strip()
 
 
+def prompt_alternatives(channel: str, seed: str, count: int) -> str:
+    return f"""
+请根据用户想法生成 {count} 个番茄小说备选方案，必须输出合法 JSON，不要 Markdown，不要代码块。
+
+用户想法：{seed or '没有具体想法，请按当前番茄趋势给出可执行方案'}
+频道偏好：{channel}
+
+要求：
+- 每个方案都要适合番茄小说，开局冲突强，卖点清晰。
+- 女频方案偏清醒成长、虐渣反击、情感拉扯、短剧感；男频方案偏热血逆袭、身份曝光、系统脑洞、打脸升级。
+- 不要只给标签，要给可以直接开写的核心创意。
+
+JSON 格式：
+{{
+  "alternatives": [
+    {{
+      "title": "书名",
+      "channel": "男频/女频",
+      "genre": "类型",
+      "logline": "一句话卖点",
+      "premise": "完整核心创意，包含主角、开局冲突、金手指/核心矛盾、爽点走向",
+      "opening_hook": "前三百字钩子",
+      "selling_points": ["爽点1", "爽点2", "爽点3"],
+      "risk_notes": "写作风险或避坑提醒"
+    }}
+  ]
+}}
+""".strip()
+
+
 def prompt_chapter(job: NovelJob, outline: Dict[str, Any], chapter_outline: Dict[str, Any], previous_summary: str) -> str:
     return f"""
 请根据大纲写第 {chapter_outline.get('chapter')} 章正文，只输出章节正文，不要解释，不要 Markdown 代码块。
@@ -378,8 +408,10 @@ class App(tk.Tk):
         nb.pack(fill="both", expand=True, padx=10, pady=10)
 
         gen = ttk.Frame(nb)
+        alternatives_tab = ttk.Frame(nb)
         cfg_tab = ttk.Frame(nb)
         nb.add(gen, text="生成小说")
+        nb.add(alternatives_tab, text="备选方案")
         nb.add(cfg_tab, text="模型配置")
 
         self.vars: Dict[str, tk.StringVar] = {}
@@ -432,6 +464,41 @@ class App(tk.Tk):
         self.log_text = tk.Text(log_frame, height=18, wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
 
+        # 备选方案页
+        alt_form = ttk.LabelFrame(alternatives_tab, text="生成备选小说方案")
+        alt_form.pack(fill="x", padx=8, pady=8)
+        self.vars["alt_channel"] = self.v("不限")
+        self.vars["alt_count"] = self.v("5")
+        ttk.Label(alt_form, text="频道偏好").grid(row=0, column=0, sticky="w", padx=6, pady=5)
+        ttk.Combobox(alt_form, textvariable=self.vars["alt_channel"], values=["不限", "男频", "女频"], width=20).grid(row=0, column=1, sticky="w", padx=6, pady=5)
+        ttk.Label(alt_form, text="数量").grid(row=0, column=2, sticky="w", padx=6, pady=5)
+        ttk.Entry(alt_form, textvariable=self.vars["alt_count"], width=8).grid(row=0, column=3, sticky="w", padx=6, pady=5)
+        ttk.Label(alt_form, text="想法/关键词").grid(row=1, column=0, sticky="nw", padx=6, pady=5)
+        self.alt_seed_text = tk.Text(alt_form, height=5, wrap="word")
+        self.alt_seed_text.grid(row=1, column=1, columnspan=4, sticky="we", padx=6, pady=5)
+        self.alt_seed_text.insert("1.0", "可以留空；也可以写：追妻火葬场、都市脑洞、末世囤货、规则怪谈、女主复仇、赘婿逆袭等。")
+        alt_form.columnconfigure(4, weight=1)
+
+        alt_btns = ttk.Frame(alternatives_tab)
+        alt_btns.pack(fill="x", padx=8, pady=4)
+        ttk.Button(alt_btns, text="生成备选方案", command=self.start_alternatives).pack(side="left", padx=4)
+        ttk.Button(alt_btns, text="使用选中方案", command=self.use_selected_alternative).pack(side="left", padx=4)
+        ttk.Button(alt_btns, text="清空列表", command=self.clear_alternatives).pack(side="left", padx=4)
+
+        alt_pane = ttk.PanedWindow(alternatives_tab, orient="horizontal")
+        alt_pane.pack(fill="both", expand=True, padx=8, pady=8)
+        list_frame = ttk.Frame(alt_pane)
+        detail_frame = ttk.Frame(alt_pane)
+        alt_pane.add(list_frame, weight=1)
+        alt_pane.add(detail_frame, weight=2)
+
+        self.alt_list = tk.Listbox(list_frame, height=18)
+        self.alt_list.pack(fill="both", expand=True)
+        self.alt_list.bind("<<ListboxSelect>>", self.on_alternative_select)
+        self.alt_detail = tk.Text(detail_frame, height=18, wrap="word")
+        self.alt_detail.pack(fill="both", expand=True)
+        self.alternatives = []
+
         # 配置页
         self.vars["text_base_url"] = self.v(text_cfg.get("base_url", ""))
         self.vars["text_api_key"] = self.v(text_cfg.get("api_key", ""))
@@ -474,6 +541,118 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(200, self.drain_logs)
+
+    def get_text_client_from_ui(self) -> OpenAICompatibleClient:
+        text_cfg = {
+            "base_url": self.vars["text_base_url"].get().strip(),
+            "api_key": self.vars["text_api_key"].get().strip(),
+            "model": self.vars["text_model"].get().strip(),
+            "timeout": int(float(self.vars["text_timeout"].get())),
+        }
+        if not text_cfg["api_key"]:
+            raise RuntimeError("请先在模型配置里填写文本模型 API Key")
+        return OpenAICompatibleClient(text_cfg["base_url"], text_cfg["api_key"], text_cfg["model"], text_cfg["timeout"])
+
+    def start_alternatives(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning("正在运行", "已有任务正在运行，请等待完成。")
+            return
+        self.save_cfg_from_ui()
+        self.worker = threading.Thread(target=self.run_alternatives_worker, daemon=True)
+        self.worker.start()
+
+    def run_alternatives_worker(self):
+        try:
+            client = self.get_text_client_from_ui()
+            channel = self.vars["alt_channel"].get().strip()
+            seed = self.alt_seed_text.get("1.0", "end").strip()
+            count = max(1, min(10, int(self.vars["alt_count"].get())))
+            self.log(f"生成 {count} 个备选方案...")
+            content = client.chat([
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_alternatives(channel, seed, count)},
+            ], temperature=float(self.vars["text_temp"].get()), max_tokens=6000)
+            data = extract_json(content)
+            alternatives = data.get("alternatives") or []
+            if not alternatives:
+                raise RuntimeError("模型没有返回 alternatives")
+            self.alternatives = alternatives
+            self.after(0, self.refresh_alternative_list)
+            self.log(f"备选方案已生成：{len(alternatives)} 个")
+        except Exception as e:
+            self.log(f"生成备选方案失败：{e}")
+            messagebox.showerror("生成备选方案失败", str(e))
+
+    def refresh_alternative_list(self):
+        self.alt_list.delete(0, "end")
+        for i, item in enumerate(self.alternatives, start=1):
+            title = item.get("title") or "未命名"
+            channel = item.get("channel") or ""
+            genre = item.get("genre") or ""
+            self.alt_list.insert("end", f"{i}. [{channel}] {title} - {genre}")
+        if self.alternatives:
+            self.alt_list.selection_set(0)
+            self.on_alternative_select()
+
+    def selected_alternative(self):
+        sel = self.alt_list.curselection()
+        if not sel:
+            return None
+        idx = sel[0]
+        if idx < 0 or idx >= len(self.alternatives):
+            return None
+        return self.alternatives[idx]
+
+    def on_alternative_select(self, event=None):
+        item = self.selected_alternative()
+        self.alt_detail.delete("1.0", "end")
+        if not item:
+            return
+        lines = [
+            f"书名：{item.get('title','')}",
+            f"频道：{item.get('channel','')}",
+            f"类型：{item.get('genre','')}",
+            f"一句话卖点：{item.get('logline','')}",
+            "",
+            "核心创意：",
+            item.get("premise", ""),
+            "",
+            f"开篇钩子：{item.get('opening_hook','')}",
+            "",
+            "爽点：",
+        ]
+        for sp in item.get("selling_points", []):
+            lines.append(f"- {sp}")
+        if item.get("risk_notes"):
+            lines.extend(["", f"避坑：{item.get('risk_notes')}"])
+        self.alt_detail.insert("1.0", "\n".join(lines))
+
+    def use_selected_alternative(self):
+        item = self.selected_alternative()
+        if not item:
+            messagebox.showwarning("未选择", "请先选择一个备选方案。")
+            return
+        self.vars["title"].set(item.get("title", ""))
+        channel = item.get("channel") or self.vars["alt_channel"].get()
+        if channel in ("男频", "女频", "双频/其他"):
+            self.vars["channel"].set(channel)
+        self.vars["genre"].set(item.get("genre", ""))
+        premise = item.get("premise") or item.get("logline") or ""
+        extras = []
+        if item.get("opening_hook"):
+            extras.append(f"开篇钩子：{item.get('opening_hook')}")
+        if item.get("selling_points"):
+            extras.append("爽点：" + "；".join(item.get("selling_points", [])))
+        if extras:
+            premise = premise + "\n" + "\n".join(extras)
+        self.premise_text.delete("1.0", "end")
+        self.premise_text.insert("1.0", premise)
+        messagebox.showinfo("已使用", "已将选中备选方案填入生成小说页，可直接开始生成。")
+
+    def clear_alternatives(self):
+        self.alternatives = []
+        self.alt_list.delete(0, "end")
+        self.alt_detail.delete("1.0", "end")
 
     def save_cfg_from_ui(self):
         try:
